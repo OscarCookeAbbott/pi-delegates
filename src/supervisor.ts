@@ -344,10 +344,14 @@ export class Supervisor {
     return result.text;
   }
 
-  line(run: Run) {
+  statusLabel(run: Run) {
     const child = this.live.get(run.id);
     const percent = child?.percent;
-    return `[${run.id}] ${run.title} · ${run.state.replaceAll("_", " ")}${child?.activity ? ` · ${child.activity}` : ""} · ${percent == null ? "—" : `${Math.round(percent)}%`}`;
+    return `${run.state.replaceAll("_", " ")}${child?.activity ? ` · ${child.activity}` : ""} · ${percent == null ? "—" : `${Math.round(percent)}%`}`;
+  }
+
+  line(run: Run) {
+    return `[${run.id}] ${run.title} · ${this.statusLabel(run)}`;
   }
 
   info(run: Run) {

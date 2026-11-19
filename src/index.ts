@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { bindChild, callerFor, errorText } from "./child.ts";
 import { Supervisor, type Run, type Settings } from "./supervisor.ts";
@@ -22,6 +22,23 @@ const parameters = Type.Object({
   denyTools: Type.Optional(Type.Array(Type.String(), { description: "For start: exclude these inherited tools" })),
 }, { additionalProperties: false });
 const clean = (text: string) => stripVTControlCharacters(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+
+export function delegateLabel(run: Pick<Run, "id" | "title" | "model">, status: string, width?: number): string {
+  const compact = (text: string) => clean(text).replace(/\s+/g, " ").trim();
+  const id = `[${run.id}]`;
+  const title = compact(run.title);
+  const model = ` · ${compact(run.model)}`;
+  let suffix = ` · ${compact(status)}${model}`;
+  if (width === undefined) return `${id} ${title}${suffix}`;
+  if (width <= 0) return "";
+  let titleWidth = width - visibleWidth(id + " " + suffix);
+  if (titleWidth < 1) {
+    suffix = model;
+    titleWidth = width - visibleWidth(id + " " + suffix);
+  }
+  if (titleWidth < 1) return clean(truncateToWidth(id + suffix, width, "…"));
+  return `${id} ${clean(truncateToWidth(title, titleWidth, "…"))}${suffix}`;
+}
 
 export default function delegatesExtension(pi: ExtensionAPI) {
   const inherited = process.connected && process.env.PI_DELEGATE_TOOLS;
@@ -65,17 +82,19 @@ export default function delegatesExtension(pi: ExtensionAPI) {
     if (!current || !runs.length) { ctx.ui.setWidget("delegates", undefined); return; }
     ctx.ui.setWidget("delegates", (_tui, theme) => ({
       render(width: number) {
-        const lines: string[] = [theme.fg("muted", `Delegates · ${runs.length}`)];
+        const running = runs.filter((run) => run.state === "running").length;
+        const lines: string[] = [theme.fg("muted", `Delegates · ${running}/${runs.length} running`)];
         const supervisor = current;
         function append(parent?: string, depth = 0) {
           for (const run of runs) {
             const visibleParent = runs.some((item) => item.id === run.parent) ? run.parent : undefined;
             if (visibleParent !== parent) continue;
-            const line = clean(supervisor.line(run)).replace(/\s+/g, " ");
+            const indent = "  ".repeat(depth);
+            const label = delegateLabel(run, supervisor.statusLabel(run), width - indent.length);
             let color: "warning" | "muted" | "accent" = "accent";
             if (run.state.startsWith("waiting")) color = "warning";
             if (run.state === "interrupted") color = "muted";
-            lines.push(`${"  ".repeat(depth)}${theme.fg(color, line)}`);
+            lines.push(indent + theme.fg(color, label));
             append(run.id, depth + 1);
           }
         }
@@ -116,7 +135,7 @@ export default function delegatesExtension(pi: ExtensionAPI) {
         run = current.runs.find(({ id }) => id === selected);
         if (!run) throw new Error(`Unknown delegate [${selected}].`);
       } else {
-        const rows = current.runs.map((entry) => clean(current.line(entry)).replace(/\s+/g, " "));
+        const rows = current.runs.map((entry) => delegateLabel(entry, current.statusLabel(entry)));
         const row = await ctx.ui.select("Delegates", rows);
         run = row === undefined ? undefined : current.runs[rows.indexOf(row)];
       }
@@ -128,7 +147,7 @@ export default function delegatesExtension(pi: ExtensionAPI) {
       if (run.state === "interrupted" || run.state === "failed") options.push("Resume");
       if (!["complete", "cancelled"].includes(run.state)) options.push("Cancel");
       while (true) {
-        const action = await ctx.ui.select(clean(current.line(run)).replace(/\s+/g, " "), options);
+        const action = await ctx.ui.select(delegateLabel(run, current.statusLabel(run)), options);
         if (!action || action === "Close") return;
         if (action === "View details" || action === "View tasks") {
           const text = action === "View details" ? current.info(run) : current.taskAction(run, { action: "list" });

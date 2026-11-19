@@ -6,7 +6,9 @@ import { dirname, join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { RpcClient } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { test } from "node:test";
+import { delegateLabel } from "../src/index.ts";
 import { Supervisor, inheritedTools } from "../src/supervisor.ts";
 
 const extension = fileURLToPath(new URL("../src/index.ts", import.meta.url));
@@ -92,6 +94,16 @@ for (const entry of [pathToFileURL(provider).href, "~/provider.ts"]) {
     }
   });
 }
+
+test("delegate labels shorten the title before the model on narrow rows", () => {
+  const run = { id: "aB", title: "検証計画 with a long title", model: "provider/model" };
+  const status = "running · read · 25%";
+  assert.equal(delegateLabel(run, status), `[aB] ${run.title} · ${status} · ${run.model}`);
+  const label = delegateLabel(run, status, 51);
+  assert.ok(visibleWidth(label) <= 51);
+  assert.match(label, /^\[aB\] .*… · running · read · 25% · provider\/model$/);
+  assert.match(delegateLabel(run, status, 25), / · provider\/model$/);
+});
 
 test("tool filters only narrow and deny wins", () => {
   assert.deepEqual(inheritedTools(["read", "delegate", "range_edit", "bash_async"], { allowTools: ["read", "range_edit", "ls"], denyTools: ["read"] }), ["range_edit"]);
