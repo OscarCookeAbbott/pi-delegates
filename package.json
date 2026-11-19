@@ -1,0 +1,28 @@
+{
+  "name": "@oscar-robin/pi-delegates",
+  "version": "0.1.0",
+  "description": "Session-owned work delegation for Pi.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi-extension"],
+  "files": ["src", "README.md", "LICENSE"],
+  "pi": { "extensions": ["./src/index.ts"] },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "prepack": "npm run check && npm test"
+  },
+  "engines": { "node": ">=22.19.0" },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.5.2",
+    "@earendil-works/pi-tui": ">=1.5.2",
+    "typebox": "^1.3.27"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-tui": "1.5.2",
+    "@types/node": "22.19.19",
+    "typebox": "1.3.27",
+    "typescript": "7.0.2"
+  }
+}
