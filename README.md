@@ -1,11 +1,28 @@
 # pi-delegates
 
-Delegate bounded work to fresh Pi sessions. The widget shows live and resumable work; `/delegates` opens history, details, and controls. `delegate` exposes `start`, `list`, `info`, `steer`, `request_steer`, `resume`, and `cancel`. Use exact two-character IDs.
+Delegate work to fresh Pi sessions. Each delegate starts with its own brief, not the parent's conversation. Delegates can start their own children, ask their parent for guidance, and resume from a saved conversation.
 
-A waiting delegate saves its question and stops. Reply with `steer`, or `resume` with a message and optional model. Quitting or switching the root session stops its delegates; reopen that session to resume them manually. A transcript is not a checkpoint for a running command. Delegates use the same filesystem as the root unless you give them another `cwd`; no Git or worktree setup is performed.
+**No built-in sandboxing or worktree management.** A delegate is a separate process running with your OS permissions. It starts in its parent's working directory unless you pass `cwd`. You can point it at a worktree you created yourself, but changing `cwd` or filtering tools is not a security boundary.
 
-Children inherit the parent's model and enabled tools. They load extensions through normal Pi discovery plus the caller's explicit file extensions. A tool that cannot be loaded in the child is reported before work starts. Filters constrain tool exposure, not filesystem or process permissions. Optional `delegates` settings: `allowTools` and `denyTools` (empty by default, deny wins), `maxDepth` (3), `maxConcurrent` (4), and `maxLaunches` (64 per root session). You can also narrow tools on `start`.
+## Install
 
-With a compatible `pi-tasks` installed, `tasks` and `task_notes` default to the delegate's own tree. Pass `delegateId` to access a child's tree; `/delegates` shows it to the user. No other extensions are required.
+```sh
+pi install git:github.com/OscarCookeAbbott/pi-delegates@v0.1.0
+```
 
-Install with `pi install git:github.com/OscarCookeAbbott/pi-delegates`. Requires Pi 1.5.2+ and Node 22.19+. To try a local checkout, run `pi -e ./src/index.ts`.
+Requires Pi 1.5.2+ and Node 22.19+. To try a local checkout, run `pi -e ./src/index.ts`.
+
+## Use
+
+Ask Pi to delegate a task. The live tree shows activity and context usage; `/delegates` opens history, details, and controls. The `delegate` tool supports `start`, `list`, `info`, `steer`, `request_steer`, `resume`, and `cancel`. IDs are exact, case-sensitive two-character strings.
+
+- **Model:** `start` inherits the direct parent's model; `resume` keeps the delegate's last model. Both accept a `model` override.
+- **Tools:** Delegates inherit their parent's enabled work tools. Pi loads extensions through normal discovery plus the parent's explicit CLI extensions. If an inherited tool is missing, the run fails before work starts. `allowTools` and `denyTools` can narrow the inherited set in `delegates` settings or on `start`. Both default to empty; deny wins.
+- **Steering and resume:** `steer` queues guidance at a turn boundary or replies to a paused delegate. A delegate that calls `request_steer` saves its question and stops. Quitting or switching the root session stops live delegates; reopen that session to resume manually. Transcripts are saved locally and cannot resume an in-flight command.
+
+Default limits per root session: depth **3**, concurrent delegates **4**, total starts **64** (`maxDepth`, `maxConcurrent`, `maxLaunches` under `delegates` settings).
+
+## Optional integrations
+
+- [pi-tasks](https://github.com/OscarCookeAbbott/pi-tasks/commit/69a429a) (`69a429a` or later): `tasks` and `task_notes` default to the delegate's own tree. Pass `delegateId` to view or edit a child's tree. Users can view it in `/delegates`.
+- [pi-async-jobs](https://github.com/OscarCookeAbbott/pi-async-jobs/commit/39ff993) (`39ff993` or later): stops background jobs early when the delegate shuts down. `pi-range-edit` and other enabled work tools are inherited when available.
