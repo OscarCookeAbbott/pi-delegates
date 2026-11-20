@@ -10,7 +10,7 @@ import { Supervisor, type Run, type Settings } from "./supervisor.ts";
 
 const id = Type.String({ pattern: "^[0-9a-zA-Z]{2}$", description: "Exact case-sensitive delegate ID" });
 const parameters = Type.Object({
-  action: Type.Union((["start", "list", "info", "steer", "request_steer", "resume", "cancel"] as const).map((name) => Type.Literal(name))),
+  action: Type.Union((["start", "list", "info", "request_update", "update", "steer", "request_steer", "interrupt", "resume", "cancel"] as const).map((name) => Type.Literal(name))),
   id: Type.Optional(id),
   title: Type.Optional(Type.String({ maxLength: 160 })),
   brief: Type.Optional(Type.String({ maxLength: 24_000 })),
@@ -110,7 +110,7 @@ export default function delegatesExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "delegate",
     label: "Delegate",
-    description: "Assign a bounded task in a fresh Pi session with start (title, brief, optional cwd/model). Returns immediately. Use list or info (id) to inspect runs; steer (id, message) queues live guidance or replies to a waiting delegate. resume (id, optional message/model) continues a saved session; cancel (id) ends its subtree. Delegates use request_steer (question) to pause and ask their parent. Results and questions arrive automatically; do not poll. Delegate only when requested or otherwise authorized.",
+    description: "Assign a bounded task in a fresh Pi session with start (title, brief, optional cwd/model). Returns immediately. Use list or info (id) to inspect runs without interrupting them. Use request_update (id) for a running delegate's progress; delegates use update (message) to report progress and keep working. Use steer (id, message) to queue guidance or reply to a paused delegate. interrupt (id) stops a live delegate without ending its subtree; resume (id, optional message/model) continues its saved session. cancel (id) permanently ends its subtree. Delegates use request_steer (question) to pause and ask their parent. Results, progress updates, and questions arrive automatically; do not poll. Delegate only when requested or otherwise authorized.",
     promptSnippet: "Delegate bounded work to another Pi session and receive its result or question asynchronously.",
     parameters,
     executionMode: "sequential",
@@ -144,6 +144,7 @@ export default function delegatesExtension(pi: ExtensionAPI) {
       options.push("View details");
       if (getTaskService()) options.push("View tasks");
       if (run.state === "running" || run.state === "waiting_for_children" || run.state === "waiting_for_reply") options.push(run.question ? "Reply" : "Steer");
+      if (["starting", "running", "waiting_for_children"].includes(run.state)) options.push("Interrupt");
       if (run.state === "interrupted" || run.state === "failed") options.push("Resume");
       if (!["complete", "cancelled"].includes(run.state)) options.push("Cancel");
       while (true) {
@@ -154,10 +155,12 @@ export default function delegatesExtension(pi: ExtensionAPI) {
           await ctx.ui.editor(action, clean(text));
           continue;
         }
-        if (action === "Cancel" && !await ctx.ui.confirm(`Cancel [${run.id}]?`, "This also cancels its descendants.")) return;
+        if (action === "Cancel" && !await ctx.ui.confirm(`Cancel [${run.id}]?`, "This permanently cancels the delegate and its descendants. Use Interrupt to keep it resumable.")) return;
         let message: string | undefined;
-        if (action !== "Cancel") message = await ctx.ui.input(action === "Resume" ? "Resume instructions (optional)" : action);
-        if (action !== "Cancel" && message === undefined) return;
+        if (action !== "Cancel" && action !== "Interrupt") {
+          message = await ctx.ui.input(action === "Resume" ? "Resume instructions (optional)" : action);
+          if (message === undefined) return;
+        }
         ctx.ui.notify(clean(await current.execute({ action: action === "Reply" ? "steer" : action.toLowerCase(), id: run.id, message }, callerFor(pi, ctx))), "info");
         return;
       }

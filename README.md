@@ -7,18 +7,19 @@ Delegate work to fresh Pi sessions. Each delegate starts with its own brief, not
 ## Install
 
 ```sh
-pi install git:github.com/OscarCookeAbbott/pi-delegates@v0.1.1
+pi install git:github.com/OscarCookeAbbott/pi-delegates@v0.2.0
 ```
 
 Requires Pi 1.5.2+ and Node 22.19+. To try a local checkout, run `pi -e ./src/index.ts`.
 
 ## Use
 
-Ask Pi to delegate a task. The live tree shows activity and context usage; `/delegates` opens history, details, and controls. The `delegate` tool supports `start`, `list`, `info`, `steer`, `request_steer`, `resume`, and `cancel`. IDs are exact, case-sensitive two-character strings.
+Ask Pi to delegate a task. The live tree shows activity and context usage; `/delegates` opens history, details, and controls. Use exact, case-sensitive two-character IDs.
 
 - **Model:** `start` inherits the direct parent's model; `resume` keeps the delegate's last model. Both accept a `model` override.
 - **Tools:** Delegates inherit their parent's enabled work tools. Pi loads extensions through normal discovery plus the parent's explicit CLI extensions. If an inherited tool is missing, the run fails before work starts. `allowTools` and `denyTools` can narrow the inherited set in `delegates` settings or on `start`. Both default to empty; deny wins.
-- **Steering and resume:** `steer` queues guidance at a turn boundary or replies to a paused delegate. A delegate that calls `request_steer` saves its question and stops. Quitting or switching the root session stops live delegates; reopen that session to resume manually. Transcripts are saved locally and cannot resume an in-flight command.
+- **Progress:** `request_update {id}` asks a running delegate for a report at its next turn boundary. Delegates use `update {message}` to report progress without pausing. `info {id}` shows the latest report without sending a message.
+- **Steering and resume:** `steer` queues guidance at a turn boundary or replies to a paused delegate. A delegate that calls `request_steer` saves its question and stops. If a model or tool call stalls, use `interrupt {id}` and then `resume`; `cancel` permanently ends the run and its descendants. Quitting or switching the root session stops live delegates; reopen that session to resume manually. Transcripts are saved locally and cannot resume an in-flight command.
 
 Default limits per root session: depth **3**, concurrent delegates **4**, total starts **64** (`maxDepth`, `maxConcurrent`, `maxLaunches` under `delegates` settings).
 

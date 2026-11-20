@@ -13,7 +13,7 @@ export type Run = {
   id: string; parent?: string; title: string; brief: string; cwd: string; model: string; tools: string[]; extensions: string[];
   session: string; createdAt: number; updatedAt: number;
   state: "starting" | "running" | "waiting_for_children" | "waiting_for_reply" | "interrupted" | "complete" | "failed" | "cancelled";
-  question?: string; unconfirmedReply?: string; result?: string; tasks?: unknown;
+  question?: string; unconfirmedReply?: string; lastUpdate?: string; result?: string; tasks?: unknown;
 };
 export type Settings = { allowTools?: string[]; denyTools?: string[]; maxDepth?: number; maxConcurrent?: number; maxLaunches?: number };
 type Child = { process: ChildProcess; exited: Promise<void>; startup: NodeJS.Timeout; prompt: string; stopping?: boolean; stderr: string; activity?: string; percent?: number | null };
@@ -130,10 +130,24 @@ export class Supervisor {
       this.update(caller, { question, state: "waiting_for_reply" });
       return "Question saved. Work pauses here until your parent replies.";
     }
+    if (params.action === "update") {
+      if (!caller || caller.state !== "running") throw new Error("Only running delegates can send progress updates.");
+      const message = required(params.message, "Message");
+      if (message.length > 4000) throw new Error("Progress updates must be 4000 characters or fewer.");
+      this.update(caller, { lastUpdate: message });
+      this.notify(caller, `progress update:\n${message}`);
+      return "Progress update sent. Continue your work.";
+    }
     if (params.action === "tasks") return this.taskAction(params.id === undefined && caller ? caller : this.get(params.id, caller), params.params, params.notes === true);
     const run = this.get(params.id, caller);
     switch (params.action) {
       case "info": return this.info(run);
+      case "request_update": {
+        const child = this.live.get(run.id);
+        if (run.state !== "running" || !child || child.stopping) throw new Error("Delegate isn't running. Use info to see its latest state.");
+        await this.send(child, { type: "notice", text: 'Your parent requested a progress update. Use delegate with action "update" and a brief message, then continue your work.' });
+        return `[${run.id}] Progress update requested. It will reach the delegate at its next turn boundary.`;
+      }
       case "steer": {
         const message = required(params.message, "Message");
         if (run.state === "waiting_for_reply") {
@@ -145,9 +159,17 @@ export class Supervisor {
         if (!child || (run.state !== "running" && run.state !== "waiting_for_children")) throw new Error("Delegate isn't running. Use resume for an interrupted delegate.");
         if (run.state === "waiting_for_children") this.update(run, { state: "running" });
         await this.send(child, { type: "steer", text: message });
-        return `[${run.id}] Steering sent; it does not interrupt an active tool.`;
+        return `[${run.id}] Steering queued for the next turn boundary. It won't interrupt an active model request or tool.`;
+      }
+      case "interrupt": {
+        const child = this.live.get(run.id);
+        if (!busy.has(run.state) || !child || child.stopping) throw new Error("Delegate isn't running.");
+        this.update(run, { state: "interrupted" });
+        await this.stop(child);
+        return `[${run.id}] Interrupted. Resume to continue; resend any undelivered steering as the resume message.`;
       }
       case "resume": {
+        if (run.state === "cancelled") throw new Error("Cancelled delegates cannot resume. Use interrupt instead of cancel to keep a run resumable.");
         if (run.state !== "interrupted" && run.state !== "waiting_for_reply" && run.state !== "failed") throw new Error("Delegate isn't resumable.");
         const message = typeof params.message === "string" ? params.message.trim() : "";
         if (run.question && !message) throw new Error("Delegate is waiting for a reply. Supply a message.");
@@ -156,7 +178,7 @@ export class Supervisor {
         this.launch(run, existsSync(run.session) ? continuation : `${run.brief}\n\n${continuation}`, context, model);
         return `[${run.id}] Reopening delegate.`;
       }
-      case "cancel": await this.cancel(run); return `[${run.id}] Cancelled.`;
+      case "cancel": await this.cancel(run); return `[${run.id}] Cancelled. This run cannot resume.`;
       default: throw new Error(`Unknown delegate action: ${params.action}`);
     }
   }
@@ -356,6 +378,6 @@ export class Supervisor {
 
   info(run: Run) {
     return [this.line(run), run.parent && `Parent: [${run.parent}]`, `Model: ${run.model}`, `Directory: ${run.cwd}`, `Session: ${run.session}`,
-      `Created: ${new Date(run.createdAt).toISOString()}`, `Updated: ${new Date(run.updatedAt).toISOString()}`, `Brief: ${run.brief}`, run.question && `Question: ${run.question}`, run.unconfirmedReply && `Reply submitted (delivery unconfirmed): ${run.unconfirmedReply}`, run.result && `Result: ${run.result}`].filter(Boolean).join("\n");
+      `Created: ${new Date(run.createdAt).toISOString()}`, `Updated: ${new Date(run.updatedAt).toISOString()}`, `Brief: ${run.brief}`, run.question && `Question: ${run.question}`, run.unconfirmedReply && `Reply submitted (delivery unconfirmed): ${run.unconfirmedReply}`, run.lastUpdate && `Latest progress update: ${run.lastUpdate}`, run.result && `Result: ${run.result}`].filter(Boolean).join("\n");
   }
 }

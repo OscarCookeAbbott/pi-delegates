@@ -52,6 +52,7 @@ export function bindChild(pi: ExtensionAPI, tools: string[]) {
   let startingPrompt = false;
   pi.on("before_agent_start", () => pi.setActiveTools([...allowed]));
   pi.on("before_provider_request", () => {
+    send({ type: "activity", text: "model response in progress" });
     if (!startingPrompt) return;
     startingPrompt = false;
     send({ type: "prompt_started" });

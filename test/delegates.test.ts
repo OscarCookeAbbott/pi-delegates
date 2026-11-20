@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout } from "node:timers/promises";
@@ -61,6 +61,63 @@ test("real Pi: a nested delegate yields, survives quit and takes a reply without
     if (old === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = old;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("real Pi: a requested progress update is reported without pausing the delegate", { timeout: 20_000 }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-delegates-progress-"));
+  const old = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(cwd, "agent");
+  const notices: string[] = [];
+  const root = new Supervisor(join(cwd, "runs"), extension, {}, { change() {}, notify: (text) => { notices.push(text); }, tasks: () => undefined });
+  const caller = { cwd, model: "delegate-fixture/fixture/test", tools: ["fixture_tool"], extensions: [provider] };
+  try {
+    await assert.rejects(root.execute({ action: "update", message: "Unscoped" }, caller), /Only running delegates/);
+    await root.execute({ action: "start", title: "Progress", brief: "wait for progress request" }, caller);
+    const [run] = root.runs;
+    await until(() => existsSync(join(cwd, "fixture-ready")), () => run);
+    assert.match(await root.execute({ action: "request_update", id: run.id }, caller), /Progress update requested/);
+    await until(() => !root.live.has(run.id), () => run);
+    assert.equal(run.state, "complete");
+    assert.equal(run.result, "Done");
+    assert.match(notices[0], /progress update:\nFirst milestone reached\./);
+    assert.match(await root.execute({ action: "info", id: run.id }, caller), /Latest progress update: First milestone reached\./);
+    await assert.rejects(root.execute({ action: "request_update", id: run.id }, caller), /isn't running/);
+  } finally {
+    await root.close();
+    if (old === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = old;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("real Pi: a stalled response can be interrupted and resumed", { timeout: 20_000 }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-delegates-interrupt-"));
+  const old = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(cwd, "agent");
+  const root = new Supervisor(join(cwd, "runs"), extension, {}, { change() {}, notify() {}, tasks: () => undefined });
+  const caller = { cwd, model: "delegate-fixture/fixture/test", tools: [], extensions: [provider] };
+  try {
+    await root.execute({ action: "start", title: "Stalled", brief: "stall model response" }, caller);
+    const [run] = root.runs;
+    await until(() => existsSync(join(cwd, "fixture-ready")), () => run);
+    await root.execute({ action: "steer", id: run.id, message: "Queued guidance" }, caller);
+    assert.equal(run.state, "running");
+    assert.doesNotMatch(readFileSync(run.session, "utf8"), /Queued guidance/);
+    await root.execute({ action: "interrupt", id: run.id }, caller);
+    assert.equal(run.state, "interrupted");
+    assert.equal(root.live.has(run.id), false);
+    await root.execute({ action: "resume", id: run.id, message: "Continue after interrupt" }, caller);
+    await until(() => !root.live.has(run.id), () => run);
+    assert.equal(run.state, "complete");
+    const transcript = readFileSync(run.session, "utf8");
+    assert.match(transcript, /stall model response/);
+    assert.match(transcript, /Continue after interrupt/);
+  } finally {
+    await root.close();
+    if (old === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = old;
+    rmSync(cwd, { recursive: true, force: true });
   }
 });
 
