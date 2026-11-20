@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { bindChild, callerFor, errorText } from "./child.ts";
+import { conversationPreview, conversationView, readConversation } from "./conversation.ts";
 import { Supervisor, type Run, type Settings } from "./supervisor.ts";
 
 const id = Type.String({ pattern: "^[0-9a-zA-Z]{2}$", description: "Exact case-sensitive delegate ID" });
@@ -38,6 +39,26 @@ export function delegateLabel(run: Pick<Run, "id" | "title" | "model">, status: 
   }
   if (titleWidth < 1) return clean(truncateToWidth(id + suffix, width, "…"));
   return `${id} ${clean(truncateToWidth(title, titleWidth, "…"))}${suffix}`;
+}
+
+function messageAction(run: Run): "Reply" | "Steer" | "Resume" | undefined {
+  switch (run.state) {
+    case "waiting_for_reply": return "Reply";
+    case "waiting_for_children":
+    case "running": return "Steer";
+    case "interrupted":
+    case "failed": return "Resume";
+  }
+}
+
+function conversationTitle(run: Run, runs: readonly Run[]): string {
+  const path = [`[${run.id}]`];
+  let parent = run.parent;
+  while (parent && !path.includes(`[${parent}]`)) {
+    path.unshift(`[${parent}]`);
+    parent = runs.find(({ id }) => id === parent)?.parent;
+  }
+  return clean(`Root › ${path.join(" › ")} ${run.title}`).replace(/\s+/g, " ");
 }
 
 export default function delegatesExtension(pi: ExtensionAPI) {
@@ -120,6 +141,33 @@ export default function delegatesExtension(pi: ExtensionAPI) {
     },
   });
 
+  async function openConversation(ctx: ExtensionCommandContext, current: Supervisor, run: Run) {
+    const title = conversationTitle(run, current.runs);
+    while (true) {
+      const messages = await readConversation(run.session);
+      const action = messageAction(run);
+      const question = run.question;
+      const choice = await ctx.ui.custom<"back" | "refresh" | "message">((tui, theme, _keys, done) => conversationView({
+        title: theme.fg("accent", title), messages, question, messageAction: action,
+        height: () => tui.terminal.rows, render: () => tui.requestRender(), done,
+      }), { overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 } });
+      if (choice === "back" || choice === undefined) return;
+      if (choice !== "message" || !action) continue;
+      const message = (await ctx.ui.editor(`${action} · ${title}`, ""))?.trim();
+      if (!message) continue;
+      if (messageAction(run) !== action || run.question !== question) {
+        ctx.ui.notify("Delegate state changed. Review it before sending a message.", "warning");
+        continue;
+      }
+      try {
+        const receipt = await current.execute({ action: action === "Resume" ? "resume" : "steer", id: run.id, message: `Human ${action === "Reply" ? "reply" : "guidance"}:\n${message}` }, callerFor(pi, ctx));
+        ctx.ui.notify(clean(receipt), "info");
+      } catch (error) {
+        ctx.ui.notify(clean(errorText(error)), "error");
+      }
+    }
+  }
+
   if (!child) pi.registerCommand("delegates", {
     description: "Browse delegate history and manage saved runs",
     async handler(args, ctx) {
@@ -140,16 +188,22 @@ export default function delegatesExtension(pi: ExtensionAPI) {
         run = row === undefined ? undefined : current.runs[rows.indexOf(row)];
       }
       if (!run) return;
-      const options = ["Close"];
-      options.push("View details");
-      if (getTaskService()) options.push("View tasks");
-      if (run.state === "running" || run.state === "waiting_for_children" || run.state === "waiting_for_reply") options.push(run.question ? "Reply" : "Steer");
-      if (["starting", "running", "waiting_for_children"].includes(run.state)) options.push("Interrupt");
-      if (run.state === "interrupted" || run.state === "failed") options.push("Resume");
-      if (!["complete", "cancelled"].includes(run.state)) options.push("Cancel");
       while (true) {
-        const action = await ctx.ui.select(delegateLabel(run, current.statusLabel(run)), options);
+        const options = ["Open conversation", "View details"];
+        if (getTaskService()) options.push("View tasks");
+        const send = messageAction(run);
+        if (send) options.push(send);
+        if (["starting", "running", "waiting_for_children"].includes(run.state)) options.push("Interrupt");
+        if (!["complete", "cancelled"].includes(run.state)) options.push("Cancel");
+        options.push("Close");
+        const preview = await readConversation(run.session).then(conversationPreview).catch(() => "Saved conversation unavailable.");
+        const action = await ctx.ui.select([delegateLabel(run, current.statusLabel(run)), preview].filter(Boolean).join("\n\n"), options);
         if (!action || action === "Close") return;
+        if (action === "Open conversation") {
+          try { await openConversation(ctx, current, run); }
+          catch (error) { ctx.ui.notify(clean(errorText(error)), "error"); }
+          continue;
+        }
         if (action === "View details" || action === "View tasks") {
           const text = action === "View details" ? current.info(run) : current.taskAction(run, { action: "list" });
           await ctx.ui.editor(action, clean(text));

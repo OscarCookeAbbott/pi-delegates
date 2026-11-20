@@ -7,14 +7,14 @@ Delegate work to fresh Pi sessions. Each delegate starts with its own brief, not
 ## Install
 
 ```sh
-pi install git:github.com/OscarCookeAbbott/pi-delegates@v0.2.1
+pi install git:github.com/OscarCookeAbbott/pi-delegates@v0.3.0
 ```
 
 Requires Pi 1.5.2+ and Node 22.19+. To try a local checkout, run `pi -e ./src/index.ts`.
 
 ## Use
 
-Ask Pi to delegate a task. The live tree shows activity and context usage; `/delegates` opens history, details, and controls. Use exact, case-sensitive two-character IDs.
+Ask Pi to delegate a task. The live tree shows activity and context usage; `/delegates` opens history, details, and controls. Use exact, case-sensitive two-character IDs. Select a delegate for a preview, then **Open conversation** for recent saved messages. The view shows its place in the delegate tree without switching your Pi session. Press `S` to steer, reply, or resume when available, `R` to refresh, and `Esc` to go back.
 
 - **Model:** `start` inherits the direct parent's model; `resume` keeps the delegate's last model. Both accept a `model` override.
 - **Tools:** Delegates inherit their parent's enabled work tools. Pi loads extensions through normal discovery plus the parent's explicit CLI extensions. If an inherited tool is missing, the run fails before work starts. `allowTools` and `denyTools` can narrow the inherited set in `delegates` settings or on `start`. Both default to empty; deny wins.
