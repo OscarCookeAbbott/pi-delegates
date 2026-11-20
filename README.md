@@ -7,7 +7,7 @@ Delegate work to fresh Pi sessions. Each delegate starts with its own brief, not
 ## Install
 
 ```sh
-pi install git:github.com/OscarCookeAbbott/pi-delegates@v0.2.0
+pi install git:github.com/OscarCookeAbbott/pi-delegates@v0.2.1
 ```
 
 Requires Pi 1.5.2+ and Node 22.19+. To try a local checkout, run `pi -e ./src/index.ts`.

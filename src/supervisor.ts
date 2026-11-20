@@ -16,7 +16,7 @@ export type Run = {
   question?: string; unconfirmedReply?: string; lastUpdate?: string; result?: string; tasks?: unknown;
 };
 export type Settings = { allowTools?: string[]; denyTools?: string[]; maxDepth?: number; maxConcurrent?: number; maxLaunches?: number };
-type Child = { process: ChildProcess; exited: Promise<void>; startup: NodeJS.Timeout; prompt: string; stopping?: boolean; stderr: string; activity?: string; percent?: number | null };
+type Child = { process: ChildProcess; exited: Promise<void>; startup: NodeJS.Timeout; prompt: string; stopping?: boolean; stderr: string; tool?: string | null; percent?: number | null };
 type Hooks = { change: () => void; notify: (text: string) => void; tasks: (state: unknown, params: unknown, notes: boolean) => { state: unknown; text: string } | undefined };
 
 export function inheritedTools(tools: string[], settings: Settings): string[] {
@@ -265,7 +265,7 @@ export class Supervisor {
         if (run.unconfirmedReply) this.update(run, { unconfirmedReply: undefined });
         break;
       case "activity":
-        if (message.text !== undefined) child.activity = message.text;
+        if (message.tool !== undefined) child.tool = message.tool;
         if (message.percent !== undefined) child.percent = message.percent;
         this.hooks.change();
         break;
@@ -366,14 +366,16 @@ export class Supervisor {
     return result.text;
   }
 
-  statusLabel(run: Run) {
+  statusLabel(run: Run, compact = true) {
     const child = this.live.get(run.id);
     const percent = child?.percent;
-    return `${run.state.replaceAll("_", " ")}${child?.activity ? ` · ${child.activity}` : ""} · ${percent == null ? "—" : `${Math.round(percent)}%`}`;
+    const labels = { starting: "starting", running: child?.tool ?? "working", waiting_for_reply: "waiting", waiting_for_children: "waiting", interrupted: "paused", complete: "done", failed: "failed", cancelled: "cancelled" };
+    const status = compact ? labels[run.state] : run.state.replaceAll("_", " ");
+    return `${status} · ${percent == null ? "—" : `${Math.round(percent)}%`}`;
   }
 
   line(run: Run) {
-    return `[${run.id}] ${run.title} · ${this.statusLabel(run)}`;
+    return `[${run.id}] ${run.title} · ${this.statusLabel(run, false)}`;
   }
 
   info(run: Run) {

@@ -75,10 +75,11 @@ test("real Pi: a requested progress update is reported without pausing the deleg
     await assert.rejects(root.execute({ action: "update", message: "Unscoped" }, caller), /Only running delegates/);
     await root.execute({ action: "start", title: "Progress", brief: "wait for progress request" }, caller);
     const [run] = root.runs;
-    await until(() => existsSync(join(cwd, "fixture-ready")), () => run);
+    await until(() => existsSync(join(cwd, "fixture-ready")) && root.statusLabel(run).startsWith("fixture_tool · "), () => run);
     assert.match(await root.execute({ action: "request_update", id: run.id }, caller), /Progress update requested/);
     await until(() => !root.live.has(run.id), () => run);
     assert.equal(run.state, "complete");
+    assert.match(root.statusLabel(run), /^done · /);
     assert.equal(run.result, "Done");
     assert.match(notices[0], /progress update:\nFirst milestone reached\./);
     assert.match(await root.execute({ action: "info", id: run.id }, caller), /Latest progress update: First milestone reached\./);
@@ -103,9 +104,11 @@ test("real Pi: a stalled response can be interrupted and resumed", { timeout: 20
     await until(() => existsSync(join(cwd, "fixture-ready")), () => run);
     await root.execute({ action: "steer", id: run.id, message: "Queued guidance" }, caller);
     assert.equal(run.state, "running");
+    assert.match(root.statusLabel(run), /^working · /);
     assert.doesNotMatch(readFileSync(run.session, "utf8"), /Queued guidance/);
     await root.execute({ action: "interrupt", id: run.id }, caller);
     assert.equal(run.state, "interrupted");
+    assert.match(root.statusLabel(run), /^paused · /);
     assert.equal(root.live.has(run.id), false);
     await root.execute({ action: "resume", id: run.id, message: "Continue after interrupt" }, caller);
     await until(() => !root.live.has(run.id), () => run);

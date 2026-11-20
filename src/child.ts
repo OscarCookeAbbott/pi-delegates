@@ -13,7 +13,7 @@ export type FromChild =
   | { type: "ready"; model?: string; tools: string[] }
   | { type: "prompt_started" }
   | { type: "request"; id: number; params: Request; caller: Caller }
-  | { type: "activity"; text?: string; percent?: number | null }
+  | { type: "activity"; tool?: string | null; percent?: number | null }
   | { type: "settled"; text: string; error?: string; aborted: boolean };
 
 export const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -52,7 +52,6 @@ export function bindChild(pi: ExtensionAPI, tools: string[]) {
   let startingPrompt = false;
   pi.on("before_agent_start", () => pi.setActiveTools([...allowed]));
   pi.on("before_provider_request", () => {
-    send({ type: "activity", text: "model response in progress" });
     if (!startingPrompt) return;
     startingPrompt = false;
     send({ type: "prompt_started" });
@@ -61,17 +60,17 @@ export function bindChild(pi: ExtensionAPI, tools: string[]) {
   pi.on("agent_start", () => { text = ""; failure = undefined; activeTools.clear(); });
   pi.on("tool_execution_start", (event) => {
     activeTools.set(event.toolCallId, event.toolName);
-    send({ type: "activity", text: event.toolName });
+    send({ type: "activity", tool: event.toolName });
   });
   pi.on("tool_execution_end", (event) => {
     activeTools.delete(event.toolCallId);
-    send({ type: "activity", text: [...activeTools.values()].at(-1) ?? text.slice(0, 160) });
+    send({ type: "activity", tool: [...activeTools.values()].at(-1) ?? null });
   });
   pi.on("message_end", ({ message }, ctx) => {
     if (message.role !== "assistant") return;
     text = message.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").slice(0, 12_000);
     failure = message.stopReason === "error" || message.stopReason === "length" ? message.errorMessage ?? message.stopReason : undefined;
-    send({ type: "activity", text: text.slice(0, 160), percent: ctx.getContextUsage()?.percent ?? null });
+    send({ type: "activity", percent: ctx.getContextUsage()?.percent ?? null });
   });
   pi.on("session_compact", () => { send({ type: "activity", percent: null }); });
   pi.on("agent_settled", ({ aborted }, ctx) => {
