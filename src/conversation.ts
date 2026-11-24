@@ -1,105 +1,193 @@
+import { watch } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { stripVTControlCharacters } from "node:util";
-import { parseSessionEntries, SessionManager } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { Component } from "@earendil-works/pi-tui";
+import { basename, dirname } from "node:path";
+import { AssistantMessageComponent, createBashToolDefinition, createEditToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, createWriteToolDefinition, getMarkdownTheme, parseSessionEntries, SessionManager, ToolExecutionComponent, UserMessageComponent, type SessionEntry, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Box, Markdown, matchesKey, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import { errorText } from "./child.ts";
+import { clean, contentText, delegateRenderers, renderDelegateNotice, type DelegateNotice } from "./presentation.ts";
 
-type Message = { label: string; text: string };
 type Command = "back" | "refresh" | "message";
-const clean = (text: string) => stripVTControlCharacters(text).replace(/\r\n?/g, "\n").replace(/\t/g, "  ").replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, "");
+export type Conversation = Awaited<ReturnType<typeof readConversation>>;
 
-export async function readConversation(path: string): Promise<Message[]> {
+export async function readConversation(path: string) {
   const source = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return "";
     throw error;
   });
   const entries = parseSessionEntries(source);
-  const branch = SessionManager.inMemory(undefined, undefined, entries).getBranch();
-  const messages: Message[] = [];
-  for (let i = branch.length - 1; i >= 0 && messages.length < 60; i--) {
-    const entry = branch[i];
-    const message = entry.type === "message" ? entry.message : undefined;
-    let label: string;
-    let content: unknown;
-    if (entry.type === "custom_message" && entry.display) {
-      label = "Notice";
-      content = entry.content;
-    } else if (message?.role === "user" || message?.role === "assistant") {
-      label = message.role === "user" ? "Input" : "Delegate";
-      content = message.content;
-    } else if (message?.role === "toolResult") {
-      label = `${message.toolName}${message.isError ? " (error)" : ""}`;
-      content = message.content;
-    } else continue;
-    let text = typeof content === "string" ? content : "";
-    if (Array.isArray(content)) {
-      text = content.flatMap((block) => {
-        if (block.type === "text" && typeof block.text === "string") return [block.text];
-        if (block.type === "toolCall" && typeof block.name === "string") return [`Called ${block.name}`];
-        if (block.type === "image") return ["[Image]"];
-        return [];
-      }).join("\n");
-    }
-    const limit = message?.role === "toolResult" ? 1600 : 8000;
-    text = clean(text).trim();
-    if (text) messages.push({ label: clean(label), text: text.length > limit ? text.slice(0, limit).toWellFormed() + "\n…" : text });
+  return SessionManager.inMemory(undefined, undefined, entries).getBranch().filter((entry) =>
+    (entry.type === "message" && ["assistant", "user", "toolResult"].includes(entry.message.role)) ||
+    (entry.type === "custom_message" && entry.display),
+  ).slice(-60);
+}
+
+export function conversationPreview(entries: Conversation): string {
+  for (const entry of entries.toReversed()) {
+    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+    const text = clean(contentText(entry.message.content)).replace(/\s+/g, " ").trim();
+    if (text) return `Latest reply: ${truncateToWidth(text, 72)}`;
   }
-  return messages.reverse();
+  return "No saved reply yet.";
 }
 
-export function conversationPreview(messages: readonly Message[]): string {
-  return messages.filter(({ label }) => label === "Input" || label === "Delegate").slice(-2)
-    .map(({ label, text }) => `${label}: ${truncateToWidth(text.replace(/\s+/g, " "), 88)}`).join("\n");
+function transcript(entries: readonly SessionEntry[], options: ViewOptions, expanded: boolean): Component[] {
+  const { tui, theme, cwd, outputPad } = options;
+  const markdown = getMarkdownTheme();
+  const components: Component[] = [];
+  const tools = new Map<string, ToolExecutionComponent>();
+  const builtins = new Map<string, ToolDefinition<any, any, any>>([
+    createReadToolDefinition(cwd), createBashToolDefinition(cwd), createEditToolDefinition(cwd), createWriteToolDefinition(cwd),
+    createFindToolDefinition(cwd), createGrepToolDefinition(cwd), createLsToolDefinition(cwd),
+  ].map((definition) => [definition.name, definition]));
+  function tool(name: string, id: string, args: unknown) {
+    const renderer = name === "delegate" ? delegateRenderers : builtins.get(name);
+    const component = new ToolExecutionComponent(clean(name), id, args, { showImages: false, outputPad }, renderer, tui, cwd);
+    component.setArgsComplete();
+    component.setExpanded(expanded);
+    tools.set(id, component);
+    components.push(component);
+    return component;
+  }
+  for (const entry of entries) {
+    if (entry.type === "custom_message") {
+      if (entry.customType === "delegate-notice") {
+        const component = renderDelegateNotice({ ...entry, role: "custom", timestamp: Date.parse(entry.timestamp), details: entry.details as DelegateNotice | undefined }, {
+          expanded, outputPad, keyHint: () => options.expandHint, keyText: () => "",
+        }, theme);
+        if (component) components.push(component);
+      } else {
+        const box = new Box(outputPad, 1, (line) => theme.bg("customMessageBg", line));
+        box.addChild(new Markdown(clean(contentText(entry.content)), 0, 0, markdown));
+        components.push(box);
+      }
+      continue;
+    }
+    if (entry.type !== "message") continue;
+    const message = entry.message;
+    switch (message.role) {
+      case "user":
+        components.push(new UserMessageComponent(clean(contentText(message.content)), markdown, outputPad));
+        break;
+      case "assistant": {
+        const content = message.content.flatMap((block) => block.type === "text" ? [{ ...block, text: clean(block.text) }] : []);
+        if (content.length || message.errorMessage) components.push(new AssistantMessageComponent({ ...message, content, errorMessage: message.errorMessage && clean(message.errorMessage) }, true, markdown, undefined, outputPad));
+        for (const block of message.content) if (block.type === "toolCall") tool(block.name, block.id, block.arguments);
+        break;
+      }
+      case "toolResult": {
+        const row = tools.get(message.toolCallId) ?? tool(message.toolName, message.toolCallId, {});
+        row.updateResult({ ...message, content: [{ type: "text", text: clean(contentText(message.content)) }] });
+        break;
+      }
+    }
+  }
+  return components;
 }
 
-export function conversationView(options: {
-  title: string;
-  messages: readonly Message[];
-  question?: string;
-  messageAction?: string;
-  height: () => number;
-  render: () => void;
+type ViewOptions = {
+  title: () => string;
+  path: string;
+  cwd: string;
+  messages: Conversation;
+  question: () => string | undefined;
+  messageAction: () => string | undefined;
+  outputPad: number;
+  tui: TUI;
+  theme: Theme;
+  expandKey: (data: string) => boolean;
+  expandHint: string;
   done: (command: Command) => void;
-}): Component {
-  const { title, messages, question, messageAction, height, done } = options;
-  const body = messages.map(({ label, text }) => `${label}\n${text}`).join("\n\n") || "No saved messages yet.";
-  const text = question ? `${body}\n\nWaiting for a reply\n${clean(question)}` : body;
+};
+
+export function conversationView(options: ViewOptions): Component & { dispose(): void } {
+  const { tui, theme, done } = options;
+  let messages = options.messages;
+  let expanded = false;
+  let components = transcript(messages, options, expanded);
+  let lines: string[] = [];
+  let lastWidth = 0;
   let top: number | undefined;
   let bottom = 0;
   let page = 1;
-  let lastWidth = 0;
-  let lines: string[] = [];
+  let disposed = false;
+  let revision = 0;
+  let reload: ReturnType<typeof setTimeout> | undefined;
+  let error: string | undefined;
+  function redraw() { lastWidth = 0; tui.requestRender(); }
+  function rebuild() { components = transcript(messages, options, expanded); redraw(); }
+  function refresh() {
+    clearTimeout(reload);
+    const request = ++revision;
+    reload = setTimeout(async () => {
+      try {
+        const snapshot = await readConversation(options.path);
+        if (disposed || request !== revision) return;
+        messages = snapshot;
+        error = undefined;
+        rebuild();
+      } catch (failure) {
+        if (disposed || request !== revision) return;
+        error = clean(errorText(failure));
+        redraw();
+      }
+    }, 80);
+  }
+  let watcher: ReturnType<typeof watch> | undefined;
+  try {
+    watcher = watch(dirname(options.path), (_event, file) => {
+      if (!file || file === basename(options.path)) refresh();
+      else if (file === "runs.json") tui.requestRender();
+    });
+    watcher.on("error", () => watcher?.close());
+  } catch { /* Manual refresh is still available. */ }
+  refresh(); // Catch messages saved between opening the snapshot and attaching the watcher.
+
   function move(delta: number) {
-    top = Math.max(0, Math.min(bottom, (top ?? bottom) + delta));
-    options.render();
+    const next = Math.max(0, Math.min(bottom, (top ?? bottom) + delta));
+    top = next === bottom ? undefined : next;
+    tui.requestRender();
   }
   return {
     render(width) {
       if (width < 1) return [];
       if (width !== lastWidth) {
-        lines = wrapTextWithAnsi(text, width);
+        lines = components.flatMap((component) => component.render(width));
         lastWidth = width;
       }
-      page = Math.max(1, height() - 2);
-      bottom = Math.max(0, lines.length - page);
+      const question = options.question();
+      const tail = question ? new Markdown(clean(question), options.outputPad, 0, getMarkdownTheme()).render(width) : [];
+      const content = [...(lines.length ? lines : [theme.fg("muted", "No saved messages yet.")]),
+        ...(question ? ["", theme.fg("warning", "Waiting for a reply"), ...tail] : []),
+        ...(error ? [theme.fg("error", error.replace(/\n/g, " "))] : [])];
+      if (tui.terminal.rows < 3) return [truncateToWidth(theme.fg("accent", options.title()), width)];
+      page = tui.terminal.rows - 2;
+      bottom = Math.max(0, content.length - page);
       if (top !== undefined) top = Math.min(top, bottom);
       const start = top ?? bottom;
-      const shown = lines.slice(start, start + page);
+      const shown = content.slice(start, start + page);
       while (shown.length < page) shown.push("");
-      return [title, ...shown, `Esc back · ${messageAction ? `S ${messageAction} · ` : ""}R refresh · ↑↓/PgUp/PgDn scroll`]
+      const action = options.messageAction();
+      return [theme.fg("accent", options.title()), ...shown, theme.fg("muted", `Esc back · ${action ? `S ${action} · ` : ""}R refresh · ${options.expandHint} · ↑↓/PgUp/PgDn scroll`)]
         .map((line) => truncateToWidth(line, width));
     },
-    invalidate() { lastWidth = 0; },
+    invalidate() { components.forEach((component) => component.invalidate()); lastWidth = 0; },
     handleInput(data) {
       if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) done("back");
       else if (matchesKey(data, "r")) done("refresh");
-      else if (messageAction && matchesKey(data, "s")) done("message");
+      else if (options.messageAction() && matchesKey(data, "s")) done("message");
       else if (matchesKey(data, "up")) move(-1);
       else if (matchesKey(data, "down")) move(1);
       else if (matchesKey(data, "pageUp")) move(-page);
       else if (matchesKey(data, "pageDown")) move(page);
       else if (matchesKey(data, "home")) move(-Infinity);
-      else if (matchesKey(data, "end")) { top = undefined; options.render(); }
+      else if (matchesKey(data, "end")) { top = undefined; tui.requestRender(); }
+      else if (options.expandKey(data)) { expanded = !expanded; rebuild(); }
     },
+    handleMouse(event) {
+      if (event.type !== "wheel") return;
+      move(event.wheelDelta ?? 0);
+      return { handled: true };
+    },
+    dispose() { disposed = true; clearTimeout(reload); watcher?.close(); },
   };
 }

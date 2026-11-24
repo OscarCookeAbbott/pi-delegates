@@ -3,7 +3,8 @@ import { randomInt, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getPackageDir } from "@earendil-works/pi-coding-agent";
-import { errorText, type Caller, type FromChild, type Request, type ToChild } from "./child.ts";
+import { errorText, thinkingLevels, type Caller, type FromChild, type Request, type ThinkingLevel, type ToChild } from "./child.ts";
+import type { DelegateNotice } from "./presentation.ts";
 
 const alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const terminal = new Set(["complete", "failed", "cancelled"]);
@@ -11,13 +12,13 @@ const closed = new Set(["complete", "cancelled"]);
 const busy = new Set(["starting", "running", "waiting_for_children"]);
 export type Run = {
   id: string; parent?: string; title: string; brief: string; cwd: string; model: string; tools: string[]; extensions: string[];
-  session: string; createdAt: number; updatedAt: number;
+  session: string; createdAt: number; updatedAt: number; thinking?: ThinkingLevel;
   state: "starting" | "running" | "waiting_for_children" | "waiting_for_reply" | "interrupted" | "complete" | "failed" | "cancelled";
   question?: string; unconfirmedReply?: string; lastUpdate?: string; result?: string; tasks?: unknown;
 };
 export type Settings = { allowTools?: string[]; denyTools?: string[]; maxDepth?: number; maxConcurrent?: number; maxLaunches?: number };
 type Child = { process: ChildProcess; exited: Promise<void>; startup: NodeJS.Timeout; prompt: string; stopping?: boolean; stderr: string; tool?: string | null; percent?: number | null };
-type Hooks = { change: () => void; notify: (text: string) => void; tasks: (state: unknown, params: unknown, notes: boolean) => { state: unknown; text: string } | undefined };
+type Hooks = { change: () => void; notify: (text: string, details?: DelegateNotice) => void; tasks: (state: unknown, params: unknown, notes: boolean) => { state: unknown; text: string } | undefined };
 
 export function inheritedTools(tools: string[], settings: Settings): string[] {
   return [...new Set(tools)].filter((name) => !["delegate", "subagent", "subagents_enable", "subagent_supervisor", "contact_supervisor", "bg_wait"].includes(name)
@@ -27,6 +28,13 @@ export function inheritedTools(tools: string[], settings: Settings): string[] {
 function required(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is required.`);
   return value.trim();
+}
+
+function thinkingLevel(value: unknown, fallback?: ThinkingLevel): ThinkingLevel | undefined {
+  if (value === undefined) return fallback;
+  const level = thinkingLevels.find((level) => level === value);
+  if (!level) throw new Error(`Invalid thinking level. Use ${thinkingLevels.join(", ")}.`);
+  return level;
 }
 
 function modelName(value: string): string {
@@ -135,7 +143,7 @@ export class Supervisor {
       const message = required(params.message, "Message");
       if (message.length > 4000) throw new Error("Progress updates must be 4000 characters or fewer.");
       this.update(caller, { lastUpdate: message });
-      this.notify(caller, `progress update:\n${message}`);
+      this.notify(caller, "progress update:", message);
       return "Progress update sent. Continue your work.";
     }
     if (params.action === "tasks") return this.taskAction(params.id === undefined && caller ? caller : this.get(params.id, caller), params.params, params.notes === true);
@@ -175,7 +183,7 @@ export class Supervisor {
         if (run.question && !message) throw new Error("Delegate is waiting for a reply. Supply a message.");
         const model = params.model === undefined ? run.model : modelName(required(params.model, "Model"));
         const continuation = run.question ? `Reply to your question (${run.question}):\n${message}` : message || "Continue your task from the saved conversation. Check existing side effects before repeating any unfinished work.";
-        this.launch(run, existsSync(run.session) ? continuation : `${run.brief}\n\n${continuation}`, context, model);
+        this.launch(run, existsSync(run.session) ? continuation : `${run.brief}\n\n${continuation}`, context, model, thinkingLevel(params.thinking, run.thinking));
         return `[${run.id}] Reopening delegate.`;
       }
       case "cancel": await this.cancel(run); return `[${run.id}] Cancelled. This run cannot resume.`;
@@ -199,7 +207,7 @@ export class Supervisor {
     const run: Run = {
       id: this.allocate(), parent: parent?.id, title: required(params.title, "Title").slice(0, 160), brief: required(params.brief, "Brief"),
       cwd: params.cwd === undefined ? cwd : resolve(cwd, required(params.cwd, "Working directory")),
-      model: modelName(required(params.model ?? context.model, "Model")), tools, extensions: context.extensions,
+      model: modelName(required(params.model ?? context.model, "Model")), thinking: thinkingLevel(params.thinking, context.thinking), tools, extensions: context.extensions,
       session: join(this.dir, `${randomUUID()}.jsonl`), state: "starting", createdAt: now, updatedAt: now,
     };
     this.runs.push(run);
@@ -212,11 +220,12 @@ export class Supervisor {
     if (this.live.size >= (this.settings.maxConcurrent ?? 4)) throw new Error("Delegate concurrency limit reached.");
   }
 
-  private launch(run: Run, prompt: string, context: Caller, model = run.model) {
+  private launch(run: Run, prompt: string, context: Caller, model = run.model, thinking = run.thinking) {
     this.checkSlot();
     if (this.live.has(run.id)) throw new Error("Delegate is still shutting down.");
-    this.update(run, { state: "starting", model, tools: inheritedTools(run.tools, this.settings) });
+    this.update(run, { state: "starting", model, thinking, tools: inheritedTools(run.tools, this.settings) });
     const args = ["--session", run.session, "--model", model, "--name", `Delegate [${run.id}] ${run.title}`, "--tools", [...run.tools, "delegate"].join(",")];
+    if (thinking !== undefined) args.push("--thinking", thinking);
     if (run.cwd === context.cwd && context.trusted !== undefined) args.push(context.trusted ? "--approve" : "--no-approve");
     for (const path of new Set([this.extension, ...run.extensions])) args.push("--extension", path);
     let proc: ChildProcess;
@@ -257,10 +266,13 @@ export class Supervisor {
         if (missing.length) throw new Error(`Child could not load inherited tools: ${missing.join(", ")}.`);
         if (!message.model || (message.model !== run.model && message.model.slice(message.model.indexOf("/") + 1) !== run.model)) throw new Error(`Requested model ${run.model} is unavailable in the child.`);
         const reply = run.question ? child.prompt : undefined;
-        this.update(run, { state: "running", model: message.model, question: undefined, unconfirmedReply: reply });
+        this.update(run, { state: "running", model: message.model, thinking: message.thinking, question: undefined, unconfirmedReply: reply });
         await this.send(child, { type: "prompt", text: child.prompt });
         break;
       }
+      case "thinking":
+        if (run.state !== "starting" && run.thinking !== message.level) this.update(run, { thinking: message.level });
+        break;
       case "prompt_started":
         if (run.unconfirmedReply) this.update(run, { unconfirmedReply: undefined });
         break;
@@ -279,7 +291,7 @@ export class Supervisor {
       case "settled":
         if (run.state === "waiting_for_reply") {
           await this.stop(child);
-          if (!this.closing && run.state === "waiting_for_reply") this.notify(run, `asks for steering: ${run.question}`);
+          if (!this.closing && run.state === "waiting_for_reply") this.notify(run, "asks for steering:", run.question, "warning");
         } else if (message.error || message.aborted) {
           this.fail(run, child, new Error(message.error ?? "Child turn aborted."));
         } else if (this.runs.some((other) => other.parent === run.id && !terminal.has(other.state))) {
@@ -287,7 +299,7 @@ export class Supervisor {
         } else {
           this.update(run, { state: "complete", question: undefined, result: message.text });
           await this.stop(child);
-          if (!this.closing) this.notify(run, `finished${message.text ? `:\n${message.text}` : "."}`);
+          if (!this.closing) this.notify(run, "finished", message.text, "success");
         }
     }
   }
@@ -296,17 +308,19 @@ export class Supervisor {
     return new Promise((resolve, reject) => child.process.send(message, (error) => error ? reject(error) : resolve()));
   }
 
-  private notify(run: Run, text: string) {
-    const notice = `Delegate [${run.id}] ${run.title} ${text}`;
+  private notify(run: Run, status: string, body?: string, tone: DelegateNotice["tone"] = "accent") {
+    const heading = `Delegate [${run.id}] ${run.title} ${status}`;
+    const notice = body ? `${heading}\n${body}` : heading;
+    const details = { heading, tone };
     const parent = run.parent && this.runs.find((other) => other.id === run.parent);
     const child = parent && this.live.get(parent.id);
     if (!parent || !child || child.stopping || (parent.state !== "running" && parent.state !== "waiting_for_children")) {
-      this.hooks.notify(parent ? `${notice}\nParent [${parent.id}] is unavailable.` : notice);
+      this.hooks.notify(parent ? `${notice}\nParent [${parent.id}] is unavailable.` : notice, details);
       return;
     }
-    void this.send(child, { type: "notice", text: notice }).then(() => {
+    void this.send(child, { type: "notice", text: notice, details }).then(() => {
       if (parent.state === "waiting_for_children" && !child.stopping && !this.closing) this.update(parent, { state: "running" });
-    }).catch(() => { if (!this.closing) this.hooks.notify(notice); });
+    }).catch(() => { if (!this.closing) this.hooks.notify(notice, details); });
   }
 
   private fail(run: Run, child: Child, error: unknown) {
@@ -316,7 +330,7 @@ export class Supervisor {
     catch (failure) { this.hooks.notify(`Delegate [${run.id}] could not save state: ${errorText(failure)}`); }
     void this.stop(child).then(() => {
       if (this.closing || run.state === "cancelled") return;
-      this.notify(run, run.question ? `is waiting for a reply; child stopped: ${text}\nQuestion: ${run.question}` : `failed: ${text}`);
+      this.notify(run, run.question ? "is waiting for a reply" : "failed", run.question ? `${text}\nQuestion: ${run.question}` : text, "error");
     });
   }
 
@@ -345,7 +359,7 @@ export class Supervisor {
       if (child) stops.push(this.stop(child));
     }
     await Promise.all(stops);
-    if (!this.closing) this.notify(run, "was cancelled.");
+    if (!this.closing) this.notify(run, "was cancelled", undefined, "muted");
   }
 
   async close() {
@@ -379,7 +393,7 @@ export class Supervisor {
   }
 
   info(run: Run) {
-    return [this.line(run), run.parent && `Parent: [${run.parent}]`, `Model: ${run.model}`, `Directory: ${run.cwd}`, `Session: ${run.session}`,
+    return [this.line(run), run.parent && `Parent: [${run.parent}]`, `Model: ${run.model}`, run.thinking && `Thinking: ${run.thinking}`, `Directory: ${run.cwd}`, `Session: ${run.session}`,
       `Created: ${new Date(run.createdAt).toISOString()}`, `Updated: ${new Date(run.updatedAt).toISOString()}`, `Brief: ${run.brief}`, run.question && `Question: ${run.question}`, run.unconfirmedReply && `Reply submitted (delivery unconfirmed): ${run.unconfirmedReply}`, run.lastUpdate && `Latest progress update: ${run.lastUpdate}`, run.result && `Result: ${run.result}`].filter(Boolean).join("\n");
   }
 }

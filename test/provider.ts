@@ -16,7 +16,7 @@ export default function fixture(pi: ExtensionAPI) {
   });
   pi.registerProvider("delegate-fixture", {
     baseUrl: "https://example.invalid", apiKey: "fixture", api: "delegate-fixture",
-    models: [{ id: "fixture/test", name: "Test", reasoning: false, input: ["text"], cost: record.cost, contextWindow: 50_000, maxTokens: 2000 }],
+    models: [{ id: "fixture/test", name: "Test", reasoning: true, input: ["text"], cost: record.cost, contextWindow: 50_000, maxTokens: 2000 }],
     streamSimple(model, context, options) {
       const stream = createAssistantMessageEventStream();
       const last = context.messages.at(-1);

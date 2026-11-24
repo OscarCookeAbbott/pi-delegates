@@ -33,17 +33,19 @@ test("real Pi: a nested delegate yields, survives quit and takes a reply without
   process.env.PI_CODING_AGENT_DIR = agent;
   const notices: string[] = [];
   const hooks = { change() {}, notify(text: string) { notices.push(text); }, tasks: () => undefined };
-  const caller = { cwd: workspace, model: "delegate-fixture/fixture/test", tools: ["read", "fixture_tool"], extensions: [provider] };
+  const caller = { cwd: workspace, model: "delegate-fixture/fixture/test", thinking: "low" as const, tools: ["read", "fixture_tool"], extensions: [provider] };
   const registry = join(dir, "runs");
   let root: Supervisor | undefined;
   try {
     root = new Supervisor(registry, extension, {}, hooks);
     assert.throws(() => new Supervisor(registry, extension, {}, hooks), /already has/);
-    await root.execute({ action: "start", title: "Parent", brief: "spawn nested", model: "fixture/test" }, caller);
+    await root.execute({ action: "start", title: "Parent", brief: "spawn nested", model: "fixture/test", thinking: "high" }, caller);
     const first = root;
     await until(() => first.runs[1]?.state === "waiting_for_reply" && !first.live.has(first.runs[1].id), () => first.runs);
     const nested = first.runs[1];
     assert.equal(nested.parent, first.runs[0].id);
+    assert.equal(first.runs[0].thinking, "high");
+    assert.equal(nested.thinking, "high");
     assert.deepEqual(nested.tools, caller.tools);
     assert.doesNotMatch(readFileSync(nested.session, "utf8"), /Unexpected continuation/);
     assert.match(readFileSync(nested.session, "utf8"), /Question saved/);
@@ -55,6 +57,7 @@ test("real Pi: a nested delegate yields, survives quit and takes a reply without
     const resumed = root;
     await until(() => resumed.runs[1].state === "complete" && !resumed.live.has(nested.id), () => resumed.runs);
     assert.equal(resumed.runs[1].result, "Received: Option B");
+    assert.equal(resumed.runs[1].thinking, "high", "resume retains the saved effort instead of the caller's low level");
     assert.match(readFileSync(nested.session, "utf8"), /Received: Option B/);
   } finally {
     await root?.close();
@@ -110,9 +113,10 @@ test("real Pi: a stalled response can be interrupted and resumed", { timeout: 20
     assert.equal(run.state, "interrupted");
     assert.match(root.statusLabel(run), /^paused · /);
     assert.equal(root.live.has(run.id), false);
-    await root.execute({ action: "resume", id: run.id, message: "Continue after interrupt" }, caller);
+    await root.execute({ action: "resume", id: run.id, message: "Continue after interrupt", thinking: "medium" }, caller);
     await until(() => !root.live.has(run.id), () => run);
     assert.equal(run.state, "complete");
+    assert.equal(run.thinking, "medium");
     const transcript = readFileSync(run.session, "utf8");
     assert.match(transcript, /stall model response/);
     assert.match(transcript, /Continue after interrupt/);
@@ -156,13 +160,13 @@ for (const entry of [pathToFileURL(provider).href, "~/provider.ts"]) {
 }
 
 test("delegate labels shorten the title before the model on narrow rows", () => {
-  const run = { id: "aB", title: "検証計画 with a long title", model: "provider/model" };
+  const run = { id: "aB", title: "検証計画 with a long title", model: "provider/family/model" };
   const status = "running · read · 25%";
-  assert.equal(delegateLabel(run, status), `[aB] ${run.title} · ${status} · ${run.model}`);
+  assert.equal(delegateLabel(run, status), `[aB] ${run.title} · ${status} · family/model`);
   const label = delegateLabel(run, status, 51);
   assert.ok(visibleWidth(label) <= 51);
-  assert.match(label, /^\[aB\] .*… · running · read · 25% · provider\/model$/);
-  assert.match(delegateLabel(run, status, 25), / · provider\/model$/);
+  assert.match(label, /^\[aB\] .*… · running · read · 25% · family\/model$/);
+  assert.match(delegateLabel(run, status, 25), / · family\/model$/);
 });
 
 test("tool filters only narrow and deny wins", () => {

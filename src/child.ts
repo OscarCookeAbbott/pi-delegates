@@ -2,15 +2,20 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { DelegateNotice } from "./presentation.ts";
 
-export type Caller = { cwd: string; model?: string; tools: string[]; extensions: string[]; trusted?: boolean };
+export const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = typeof thinkingLevels[number];
+export type Caller = { cwd: string; model?: string; thinking?: ThinkingLevel; tools: string[]; extensions: string[]; trusted?: boolean };
 export type Request = { action: string; id?: string; [key: string]: unknown };
 export type ToChild =
-  | { type: "prompt" | "steer" | "notice"; text: string }
+  | { type: "prompt" | "steer"; text: string }
+  | { type: "notice"; text: string; details?: DelegateNotice }
   | { type: "reply"; id: number; value?: string; error?: string }
   | { type: "stop" };
 export type FromChild =
-  | { type: "ready"; model?: string; tools: string[] }
+  | { type: "ready"; model?: string; thinking: ThinkingLevel; tools: string[] }
+  | { type: "thinking"; level: ThinkingLevel }
   | { type: "prompt_started" }
   | { type: "request"; id: number; params: Request; caller: Caller }
   | { type: "activity"; tool?: string | null; percent?: number | null }
@@ -33,7 +38,7 @@ export function callerFor(pi: ExtensionAPI, ctx: ExtensionContext): Caller {
       else extensions.push(resolve(entry));
     }
   }
-  return { cwd: ctx.cwd, model: ctx.model && `${ctx.model.provider}/${ctx.model.id}`, trusted: ctx.isProjectTrusted(), tools, extensions: [...new Set(extensions)] };
+  return { cwd: ctx.cwd, model: ctx.model && `${ctx.model.provider}/${ctx.model.id}`, thinking: ctx.thinkingLevel, trusted: ctx.isProjectTrusted(), tools, extensions: [...new Set(extensions)] };
 }
 
 export function bindChild(pi: ExtensionAPI, tools: string[]) {
@@ -91,8 +96,10 @@ export function bindChild(pi: ExtensionAPI, tools: string[]) {
     process.once("disconnect", stop);
     pi.setActiveTools([...allowed]);
     const model = ctx.model && `${ctx.model.provider}/${ctx.model.id}`;
-    send({ type: "ready", tools: pi.getActiveTools(), model });
+    send({ type: "ready", tools: pi.getActiveTools(), model, thinking: pi.getThinkingLevel() });
   });
+
+  pi.on("thinking_level_select", ({ level }) => { send({ type: "thinking", level }); });
 
   const receive = (message: ToChild) => {
     if (message.type === "stop") { stop?.(); return; }
@@ -105,7 +112,7 @@ export function bindChild(pi: ExtensionAPI, tools: string[]) {
     }
     if (message.type === "prompt") { waiting = false; startingPrompt = true; }
     if (waiting) return;
-    if (message.type === "notice") pi.sendMessage({ customType: "delegate-notice", content: message.text, display: true }, { deliverAs: "steer", triggerTurn: true });
+    if (message.type === "notice") pi.sendMessage({ customType: "delegate-notice", content: message.text, display: true, details: message.details }, { deliverAs: "steer", triggerTurn: true });
     else pi.sendUserMessage(message.text, { deliverAs: "steer" });
   };
   process.on("message", receive);

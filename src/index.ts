@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { stripVTControlCharacters } from "node:util";
 import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { bindChild, callerFor, errorText } from "./child.ts";
+import { bindChild, callerFor, errorText, thinkingLevels } from "./child.ts";
 import { conversationPreview, conversationView, readConversation } from "./conversation.ts";
+import { clean, delegateRenderers, renderDelegateNotice } from "./presentation.ts";
 import { Supervisor, type Run, type Settings } from "./supervisor.ts";
 
 const id = Type.String({ pattern: "^[0-9a-zA-Z]{2}$", description: "Exact case-sensitive delegate ID" });
@@ -18,17 +18,17 @@ const parameters = Type.Object({
   message: Type.Optional(Type.String({ maxLength: 24_000 })),
   question: Type.Optional(Type.String({ maxLength: 4000 })),
   model: Type.Optional(Type.String({ description: "Optional model ID or provider/id for start or resume" })),
+  thinking: Type.Optional(Type.Union(thinkingLevels.map((level) => Type.Literal(level)), { description: "Thinking level for start or resume. Defaults to the parent's level on start and the delegate's saved level on resume." })),
   cwd: Type.Optional(Type.String({ description: "Optional working directory for start" })),
   allowTools: Type.Optional(Type.Array(Type.String(), { description: "For start: keep only these inherited tools; empty means no restriction" })),
   denyTools: Type.Optional(Type.Array(Type.String(), { description: "For start: exclude these inherited tools" })),
 }, { additionalProperties: false });
-const clean = (text: string) => stripVTControlCharacters(text).replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 
 export function delegateLabel(run: Pick<Run, "id" | "title" | "model">, status: string, width?: number): string {
   const compact = (text: string) => clean(text).replace(/\s+/g, " ").trim();
   const id = `[${run.id}]`;
   const title = compact(run.title);
-  const model = ` · ${compact(run.model)}`;
+  const model = ` · ${compact(run.model.slice(run.model.indexOf("/") + 1))}`;
   let suffix = ` · ${compact(status)}${model}`;
   if (width === undefined) return `${id} ${title}${suffix}`;
   if (width <= 0) return "";
@@ -66,6 +66,7 @@ export default function delegatesExtension(pi: ExtensionAPI) {
   const child = typeof inherited === "string" ? bindChild(pi, inherited.split(",").filter(Boolean)) : undefined;
   let supervisor: Supervisor | undefined;
   let startupError: string | undefined;
+  let expandedDelegate: string | undefined;
   type TaskService = (state: unknown, params: unknown, notes: boolean) => { state: unknown; text: string };
   function getTaskService() {
     let taskService: TaskService | undefined;
@@ -74,11 +75,12 @@ export default function delegatesExtension(pi: ExtensionAPI) {
   }
   if (!child) {
     pi.on("session_start", (_event, ctx) => {
+      expandedDelegate = undefined;
       const key = createHash("sha256").update(ctx.sessionManager.getSessionId()).digest("hex");
       try {
         supervisor = new Supervisor(join(getAgentDir(), "delegates", key), fileURLToPath(import.meta.url), (pi.getSettings() as { delegates?: Settings }).delegates ?? {}, {
           change: () => updateWidget(ctx),
-          notify: (text) => pi.sendMessage({ customType: "delegate-notice", content: clean(text), display: true }, { deliverAs: "steer", triggerTurn: true }),
+          notify: (text, details) => pi.sendMessage({ customType: "delegate-notice", content: text, display: true, details }, { deliverAs: "steer", triggerTurn: true }),
           tasks: (state, params, notes) => getTaskService()?.(state, params, notes),
         });
         startupError = undefined;
@@ -99,39 +101,64 @@ export default function delegatesExtension(pi: ExtensionAPI) {
   function updateWidget(ctx: ExtensionContext) {
     if (ctx.mode !== "tui") return;
     const current = supervisor;
-    const runs = current?.runs.filter((run) => !["complete", "failed", "cancelled"].includes(run.state)) ?? [];
-    if (!current || !runs.length) { ctx.ui.setWidget("delegates", undefined); return; }
-    ctx.ui.setWidget("delegates", (_tui, theme) => ({
-      render(width: number) {
+    if (!current) return;
+    const runs = current.runs.filter((run) => !["complete", "failed", "cancelled"].includes(run.state));
+    if (!runs.some(({ id }) => id === expandedDelegate)) expandedDelegate = undefined;
+    if (!runs.length) { ctx.ui.setWidget("delegates", undefined); return; }
+    ctx.ui.setWidget("delegates", (tui, theme) => {
+      const hitRows = new Map<number, string>();
+      const render = (width: number) => {
+        hitRows.clear();
         const running = runs.filter((run) => run.state === "running").length;
         const lines: string[] = [theme.fg("muted", `Delegates · ${running}/${runs.length} running`)];
-        const supervisor = current;
+        let shown = 0;
+        const widgetSupervisor = current;
         function append(parent?: string, depth = 0) {
           for (const run of runs) {
             const visibleParent = runs.some((item) => item.id === run.parent) ? run.parent : undefined;
             if (visibleParent !== parent) continue;
+            if (shown >= 8) return;
+            shown++;
             const indent = "  ".repeat(depth);
-            const label = delegateLabel(run, supervisor.statusLabel(run), width - indent.length);
+            const label = delegateLabel(run, widgetSupervisor.statusLabel(run), width - indent.length);
             let color: "warning" | "muted" | "accent" = "accent";
             if (run.state.startsWith("waiting")) color = "warning";
             if (run.state === "interrupted") color = "muted";
+            hitRows.set(lines.length, run.id);
             lines.push(indent + theme.fg(color, label));
+            if (expandedDelegate === run.id) {
+              const metadata = [run.parent ? `Parent [${run.parent}]` : "Root delegate", run.thinking && `thinking ${run.thinking}`, run.cwd].filter(Boolean).join(" · ");
+              const context = run.question ? `Question: ${run.question}` : run.lastUpdate ? `Update: ${run.lastUpdate}` : `Brief: ${run.brief}`;
+              for (const line of [metadata, context]) lines.push(indent + "  " + theme.fg("muted", clean(line).replace(/\s+/g, " ").trim()));
+            }
             append(run.id, depth + 1);
           }
         }
         append();
-        const visible = lines.slice(0, 9);
-        if (lines.length > visible.length) visible.push(theme.fg("muted", `… ${lines.length - visible.length} more; /delegates`));
-        return visible.map((line) => truncateToWidth(line, width));
-      },
-      invalidate() {},
-    }));
+        if (runs.length > shown) lines.push(theme.fg("muted", `… ${runs.length - shown} more; /delegates`));
+        if (expandedDelegate && ![...hitRows.values()].includes(expandedDelegate)) expandedDelegate = undefined;
+        return lines.map((line) => truncateToWidth(line, width, "…"));
+      };
+      return {
+        render,
+        handleMouse(event) {
+          const id = hitRows.get(event.y);
+          if (event.type !== "click" || event.button !== "left" || !id) return;
+          expandedDelegate = expandedDelegate === id ? undefined : id;
+          tui.requestRender();
+          return { handled: true };
+        },
+        invalidate() {},
+      };
+    });
   }
 
+  pi.registerMessageRenderer("delegate-notice", renderDelegateNotice);
   pi.registerTool({
+    ...delegateRenderers,
     name: "delegate",
     label: "Delegate",
-    description: "Assign a bounded task in a fresh Pi session with start (title, brief, optional cwd/model). Returns immediately. Use list or info (id) to inspect runs without interrupting them. Use request_update (id) for a running delegate's progress; delegates use update (message) to report progress and keep working. Use steer (id, message) to queue guidance or reply to a paused delegate. interrupt (id) stops a live delegate without ending its subtree; resume (id, optional message/model) continues its saved session. cancel (id) permanently ends its subtree. Delegates use request_steer (question) to pause and ask their parent. Results, progress updates, and questions arrive automatically; do not poll. Delegate only when requested or otherwise authorized.",
+    description: "Assign a bounded task in a fresh Pi session with start (title, brief, optional cwd/model/thinking). Returns immediately. Use list or info (id) to inspect runs without interrupting them. Use request_update (id) for a running delegate's progress; delegates use update (message) to report progress and keep working. Use steer (id, message) to queue guidance or reply to a paused delegate. interrupt (id) stops a live delegate without ending its subtree; resume (id, optional message/model/thinking) continues its saved session. cancel (id) permanently ends its subtree. Delegates use request_steer (question) to pause and ask their parent. Results, progress updates, and questions arrive automatically; do not poll. Delegate only when requested or otherwise authorized.",
     promptSnippet: "Delegate bounded work to another Pi session and receive its result or question asynchronously.",
     parameters,
     executionMode: "sequential",
@@ -145,14 +172,16 @@ export default function delegatesExtension(pi: ExtensionAPI) {
     const title = conversationTitle(run, current.runs);
     while (true) {
       const messages = await readConversation(run.session);
-      const action = messageAction(run);
-      const question = run.question;
-      const choice = await ctx.ui.custom<"back" | "refresh" | "message">((tui, theme, _keys, done) => conversationView({
-        title: theme.fg("accent", title), messages, question, messageAction: action,
-        height: () => tui.terminal.rows, render: () => tui.requestRender(), done,
+      const choice = await ctx.ui.custom<"back" | "refresh" | "message">((tui, theme, keys, done) => conversationView({
+        title: () => `${title} · ${clean(current.statusLabel(run))}`, path: run.session, cwd: run.cwd, messages,
+        question: () => run.question, messageAction: () => messageAction(run),
+        outputPad: pi.getSettings().outputPad ?? 1, tui, theme,
+        expandKey: (data) => keys.matches(data, "app.tools.expand"), expandHint: `${keys.getKeys("app.tools.expand").join("/") || "Ctrl+O"} expand/collapse`, done,
       }), { overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 } });
       if (choice === "back" || choice === undefined) return;
+      const action = messageAction(run);
       if (choice !== "message" || !action) continue;
+      const question = run.question;
       const message = (await ctx.ui.editor(`${action} · ${title}`, ""))?.trim();
       if (!message) continue;
       if (messageAction(run) !== action || run.question !== question) {
