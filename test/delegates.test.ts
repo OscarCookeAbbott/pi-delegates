@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { RpcClient } from "@earendil-works/pi-coding-agent";
+import { createEventBus, RpcClient, type ExtensionAPI, type ExtensionCommandContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { test } from "node:test";
-import { delegateLabel } from "../src/index.ts";
+import delegatesExtension, { delegateLabel } from "../src/index.ts";
 import { Supervisor, inheritedTools } from "../src/supervisor.ts";
 
 const extension = fileURLToPath(new URL("../src/index.ts", import.meta.url));
@@ -158,6 +158,62 @@ for (const entry of [pathToFileURL(provider).href, "~/provider.ts"]) {
     }
   });
 }
+
+test("the delegate menu does not send guidance as a reply to a new question", { timeout: 20_000 }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-delegates-menu-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(cwd, "agent");
+  const handlers = new Map<string, (event: object, ctx: ExtensionCommandContext) => unknown>();
+  let command: ((args: string, ctx: ExtensionCommandContext) => Promise<void>) | undefined;
+  let tool: ToolDefinition | undefined;
+  let ask = false;
+  const warnings: string[] = [];
+  const notices: string[] = [];
+  delegatesExtension({
+    events: createEventBus(), getSettings: () => ({}), getActiveTools: () => ["fixture_tool"],
+    on: (name: string, handler: NonNullable<ReturnType<typeof handlers.get>>) => handlers.set(name, handler),
+    registerTool: (definition: ToolDefinition) => { tool = definition; },
+    registerCommand: (_name: string, definition: { handler: NonNullable<typeof command> }) => { command = definition.handler; },
+    registerMessageRenderer() {}, sendMessage: (message: { content: string }) => notices.push(message.content),
+  } as unknown as ExtensionAPI);
+  const invoke = async (params: object) => {
+    assert.ok(tool);
+    return (await tool.execute("tool", params, undefined, undefined, toolContext)).content;
+  };
+  let id = "";
+  const context = { cwd, mode: "tui", isProjectTrusted: () => false,
+    sessionManager: { getSessionId: () => "menu-test" },
+    ui: { setWidget() {}, notify: (text: string, severity: string) => { if (severity === "warning") warnings.push(text); },
+      select: () => { if (ask) return undefined; ask = true; return "Steer"; },
+      input: async () => {
+        await invoke({ action: "steer", id, message: "ask parent" });
+        await until(() => notices.some((text) => text.includes("Which option?")), () => notices);
+        return "Guidance for the old turn";
+      },
+    },
+  };
+  const ctx = context as unknown as ExtensionCommandContext;
+  const toolContext = context as unknown as Parameters<ToolDefinition["execute"]>[4];
+  // Pi normally passes explicit fixture extensions in its command line.
+  process.argv.push("-e", provider);
+  try {
+    await handlers.get("session_start")?.({}, ctx);
+    const started = await invoke({ action: "start", title: "Review", brief: "wait for progress request", model: "delegate-fixture/fixture/test" });
+    id = /^\[([\da-zA-Z]{2})\]/.exec(started[0]?.type === "text" ? started[0].text : "")?.[1] ?? "";
+    assert.ok(id);
+    await until(() => existsSync(join(cwd, "fixture-ready")), () => notices);
+    assert.ok(command);
+    await command(id, ctx);
+    assert.match(warnings.join("\n"), /Delegate state changed/);
+    assert.match(JSON.stringify(await invoke({ action: "info", id })), /Question: Which option\?/);
+  } finally {
+    process.argv.splice(-2);
+    await handlers.get("session_shutdown")?.({}, ctx);
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
 
 test("delegate labels shorten the title before the model on narrow rows", () => {
   const run = { id: "aB", title: "検証計画 with a long title", model: "provider/family/model" };

@@ -168,6 +168,30 @@ export default function delegatesExtension(pi: ExtensionAPI) {
     },
   });
 
+  async function sendHumanMessage(
+    ctx: ExtensionCommandContext,
+    current: Supervisor,
+    run: Run,
+    draft: { action: NonNullable<ReturnType<typeof messageAction>>; question?: string; message: string },
+  ): Promise<boolean> {
+    const { action, question, message } = draft;
+    if (messageAction(run) !== action || run.question !== question) {
+      ctx.ui.notify("Delegate state changed. Review it before sending a message.", "warning");
+      return false;
+    }
+    try {
+      const text = message.trim();
+      const receipt = await current.execute({ action: action === "Resume" ? "resume" : "steer", id: run.id,
+        message: text ? `Human ${action === "Reply" ? "reply" : "guidance"}:\n${text}` : "",
+      }, callerFor(pi, ctx));
+      ctx.ui.notify(clean(receipt), "info");
+      return true;
+    } catch (error) {
+      ctx.ui.notify(clean(errorText(error)), "error");
+      return false;
+    }
+  }
+
   async function openConversation(ctx: ExtensionCommandContext, current: Supervisor, run: Run) {
     const title = conversationTitle(run, current.runs);
     while (true) {
@@ -184,16 +208,7 @@ export default function delegatesExtension(pi: ExtensionAPI) {
       const question = run.question;
       const message = (await ctx.ui.editor(`${action} · ${title}`, ""))?.trim();
       if (!message) continue;
-      if (messageAction(run) !== action || run.question !== question) {
-        ctx.ui.notify("Delegate state changed. Review it before sending a message.", "warning");
-        continue;
-      }
-      try {
-        const receipt = await current.execute({ action: action === "Resume" ? "resume" : "steer", id: run.id, message: `Human ${action === "Reply" ? "reply" : "guidance"}:\n${message}` }, callerFor(pi, ctx));
-        ctx.ui.notify(clean(receipt), "info");
-      } catch (error) {
-        ctx.ui.notify(clean(errorText(error)), "error");
-      }
+      await sendHumanMessage(ctx, current, run, { action, question, message });
     }
   }
 
@@ -221,6 +236,7 @@ export default function delegatesExtension(pi: ExtensionAPI) {
         const options = ["Open conversation", "View details"];
         if (getTaskService()) options.push("View tasks");
         const send = messageAction(run);
+        const question = run.question;
         if (send) options.push(send);
         if (["starting", "running", "waiting_for_children"].includes(run.state)) options.push("Interrupt");
         if (!["complete", "cancelled"].includes(run.state)) options.push("Cancel");
@@ -239,12 +255,12 @@ export default function delegatesExtension(pi: ExtensionAPI) {
           continue;
         }
         if (action === "Cancel" && !await ctx.ui.confirm(`Cancel [${run.id}]?`, "This permanently cancels the delegate and its descendants. Use Interrupt to keep it resumable.")) return;
-        let message: string | undefined;
-        if (action !== "Cancel" && action !== "Interrupt") {
-          message = await ctx.ui.input(action === "Resume" ? "Resume instructions (optional)" : action);
-          if (message === undefined) return;
+        if (send && action === send) {
+          const message = await ctx.ui.input(action === "Resume" ? "Resume instructions (optional)" : action);
+          if (message === undefined || await sendHumanMessage(ctx, current, run, { action, question, message })) return;
+          continue;
         }
-        ctx.ui.notify(clean(await current.execute({ action: action === "Reply" ? "steer" : action.toLowerCase(), id: run.id, message }, callerFor(pi, ctx))), "info");
+        ctx.ui.notify(clean(await current.execute({ action: action.toLowerCase(), id: run.id }, callerFor(pi, ctx))), "info");
         return;
       }
     },
