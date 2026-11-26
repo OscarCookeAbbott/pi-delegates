@@ -95,6 +95,36 @@ test("real Pi: a requested progress update is reported without pausing the deleg
   }
 });
 
+test("real Pi: cancelled and completed delegates can resume in the same session", { timeout: 20_000 }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-delegates-reopen-"));
+  const old = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(cwd, "agent");
+  const root = new Supervisor(join(cwd, "runs"), extension, {}, { change() {}, notify() {}, tasks: () => undefined });
+  const caller = { cwd, model: "delegate-fixture/fixture/test", tools: [], extensions: [provider] };
+  try {
+    await root.execute({ action: "start", title: "Original assignment", brief: "stall model response" }, caller);
+    const [run] = root.runs;
+    const { id, session } = run;
+    await until(() => existsSync(join(cwd, "fixture-ready")), () => run);
+    await root.execute({ action: "cancel", id }, caller);
+    assert.equal(run.state, "cancelled");
+    for (const message of ["Continue after cancellation", "Follow up after completion"]) {
+      await root.execute({ action: "resume", id, message }, caller);
+      await until(() => !root.live.has(id), () => run);
+      assert.equal(run.state, "complete");
+    }
+    await assert.rejects(root.execute({ action: "resume", id, message: "  " }, caller), /Message is required/);
+    assert.equal(root.runs.length, 1);
+    assert.equal(run.session, session);
+    assert.match(readFileSync(session, "utf8"), /stall model response[\s\S]*Continue after cancellation[\s\S]*Follow up after completion/);
+  } finally {
+    await root.close();
+    if (old === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = old;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("real Pi: a stalled response can be interrupted and resumed", { timeout: 20_000 }, async () => {
   const cwd = mkdtempSync(join(tmpdir(), "pi-delegates-interrupt-"));
   const old = process.env.PI_CODING_AGENT_DIR;

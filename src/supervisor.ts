@@ -177,16 +177,14 @@ export class Supervisor {
         return `[${run.id}] Interrupted. Resume to continue; resend any undelivered steering as the resume message.`;
       }
       case "resume": {
-        if (run.state === "cancelled") throw new Error("Cancelled delegates cannot resume. Use interrupt instead of cancel to keep a run resumable.");
-        if (run.state !== "interrupted" && run.state !== "waiting_for_reply" && run.state !== "failed") throw new Error("Delegate isn't resumable.");
-        const message = typeof params.message === "string" ? params.message.trim() : "";
-        if (run.question && !message) throw new Error("Delegate is waiting for a reply. Supply a message.");
+        if (busy.has(run.state)) throw new Error("Delegate is active. Steer or interrupt it instead.");
+        const message = required(params.message, "Message");
         const model = params.model === undefined ? run.model : modelName(required(params.model, "Model"));
-        const continuation = run.question ? `Reply to your question (${run.question}):\n${message}` : message || "Continue your task from the saved conversation. Check existing side effects before repeating any unfinished work.";
-        this.launch(run, existsSync(run.session) ? continuation : `${run.brief}\n\n${continuation}`, context, model, thinkingLevel(params.thinking, run.thinking));
+        const continuation = run.question ? `Reply to your question (${run.question}):\n${message}` : message;
+        this.launch(run, existsSync(run.session) ? continuation : `Original brief (for context):\n${run.brief}\n\nFollow-up instructions:\n${continuation}`, context, model, thinkingLevel(params.thinking, run.thinking));
         return `[${run.id}] Reopening delegate.`;
       }
-      case "cancel": await this.cancel(run); return `[${run.id}] Cancelled. This run cannot resume.`;
+      case "cancel": await this.cancel(run); return `[${run.id}] Cancelled. Resume with a message to reopen this delegate.`;
       default: throw new Error(`Unknown delegate action: ${params.action}`);
     }
   }
@@ -347,7 +345,6 @@ export class Supervisor {
   }
 
   private async cancel(run: Run) {
-    // A failed delegate remains resumable until its subtree is explicitly cancelled.
     if (closed.has(run.state)) throw new Error("Delegate already ended.");
     const branch = [run];
     for (const entry of branch) branch.push(...this.runs.filter((other) => other.parent === entry.id));

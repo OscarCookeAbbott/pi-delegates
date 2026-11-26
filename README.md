@@ -7,7 +7,7 @@ Delegate work to fresh Pi sessions. Each delegate starts with its own brief, not
 ## Install
 
 ```sh
-pi install git:github.com/OscarCookeAbbott/pi-delegates@v0.4.1
+pi install git:github.com/OscarCookeAbbott/pi-delegates@v0.5.0
 ```
 
 Requires Pi 1.5.2+ and Node 22.19+. To try a local checkout, run `pi -e ./src/index.ts`.
@@ -19,7 +19,7 @@ Ask Pi to delegate a task. The live tree shows activity and context usage; `/del
 - **Model and thinking:** `start` inherits the direct parent's model and thinking level; `resume` keeps the delegate's saved settings. Both accept `model` and `thinking` overrides. Pi clamps thinking to what the model supports.
 - **Tools:** Delegates inherit their parent's enabled work tools. Pi loads extensions through normal discovery plus the parent's explicit CLI extensions. If an inherited tool is missing, the run fails before work starts. `allowTools` and `denyTools` can narrow the inherited set in `delegates` settings or on `start`. Both default to empty; deny wins.
 - **Progress:** `request_update {id}` asks a running delegate for a report at its next turn boundary. Delegates use `update {message}` to report progress without pausing. `info {id}` shows the latest report without sending a message.
-- **Steering and resume:** `steer` queues guidance at a turn boundary or replies to a paused delegate. A delegate that calls `request_steer` saves its question and stops. If a model or tool call stalls, use `interrupt {id}` and then `resume`; `cancel` permanently ends the run and its descendants. Quitting or switching the root session stops live delegates; reopen that session to resume manually. Transcripts are saved locally and cannot resume an in-flight command.
+- **Steering and resume:** `steer` queues guidance at a turn boundary or replies to a paused delegate. A delegate that calls `request_steer` saves its question and stops. If a model or tool call stalls, use `interrupt {id}` to stop only that delegate or `cancel {id}` to stop its subtree. Use `resume {id, message}` to reopen any stopped delegate, even if it completed or was cancelled. The message starts a new turn; descendants are not restarted automatically. Quitting or switching the root session stops live delegates; reopen that session to resume manually. Transcripts are saved locally and cannot resume an in-flight command.
 
 Default limits per root session: depth **3**, concurrent delegates **4**, total starts **64** (`maxDepth`, `maxConcurrent`, `maxLaunches` under `delegates` settings).
 

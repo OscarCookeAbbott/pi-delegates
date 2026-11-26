@@ -1,6 +1,6 @@
 {
   "name": "@oscar-robin/pi-delegates",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Session-owned work delegation for Pi.",
   "type": "module",
   "license": "MIT",
